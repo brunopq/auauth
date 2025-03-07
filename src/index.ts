@@ -1,6 +1,6 @@
 import { Hono } from "hono"
 import { zValidator } from "@hono/zod-validator"
-import { sign } from "hono/jwt"
+import { jwt, sign } from "hono/jwt"
 import { z } from "zod"
 import { HTTPException } from "hono/http-exception"
 import { addDays } from "date-fns"
@@ -8,6 +8,9 @@ import { addDays } from "date-fns"
 import { db } from "./db/index.js"
 
 import { verifyPassword } from "./hashing.js"
+import type { User } from "./db/schema.js"
+import { createMiddleware } from "hono/factory"
+import { every } from "hono/combine"
 
 const app = new Hono()
 
@@ -18,6 +21,30 @@ const app = new Hono()
 
 const JWT_SECRET =
   process.env.JWT_SECRET || "your-secret-key-change-this-in-production"
+
+const jwtSchema = z.object({
+  exp: z.number(),
+  user: z.object({
+    id: z.string(),
+    name: z.string(),
+  }),
+})
+
+type Jwt = z.infer<typeof jwtSchema>
+
+const makeJwt = (user: User) => {
+  return sign(
+    // this should always be valid
+    jwtSchema.parse({
+      exp: addDays(new Date(), 1).getTime(),
+      user: {
+        id: user.id,
+        name: user.name,
+      },
+    }),
+    JWT_SECRET,
+  )
+}
 
 const loginSchema = z.object({
   username: z.string(),
@@ -43,16 +70,51 @@ app.post("/login", zValidator("json", loginSchema), async (c) => {
 
   const exp = addDays(new Date(), 1).getTime()
 
-  // cria jwt pro usuário
-  const jwt = await sign({ exp, user: userInfo }, JWT_SECRET)
+  const jwt = await sign(
+    {
+      exp,
+      user: {
+        somekey: "hehehehehehhe",
+      },
+    },
+    JWT_SECRET,
+  )
 
   return c.json({ token: jwt })
 })
 
-app.get("/", (c) => {
-  return c.json({
-    hello: "world",
-  })
-})
+// for some reason types are not working, maybe its the every function
+const jwtMiddleware = every(
+  jwt({ secret: JWT_SECRET }),
+  createMiddleware<{
+    Variables: {
+      jwtPayload: Jwt
+      something: string
+    }
+  }>(async (c, next) => {
+    const token = c.get("jwtPayload")
+    const parsed = jwtSchema.safeParse(token)
+
+    if (!parsed.success) {
+      throw new HTTPException(401, { message: "Invalid token" })
+    }
+
+    c.set("jwtPayload", parsed.data)
+
+    await next()
+  }),
+)
+
+app.get(
+  "/validate",
+  jwtMiddleware,
+
+  (c) => {
+    const token = c.get("jwtPayload")
+    return c.json({
+      token,
+    })
+  },
+)
 
 export default app
