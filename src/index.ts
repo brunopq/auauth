@@ -1,16 +1,21 @@
 import { Hono } from "hono"
-import { zValidator } from "@hono/zod-validator"
 import { jwt, sign } from "hono/jwt"
-import { z } from "zod"
 import { HTTPException } from "hono/http-exception"
+import { createMiddleware } from "hono/factory"
+import { zValidator } from "@hono/zod-validator"
+import { string, z } from "zod"
 import { addDays } from "date-fns"
 
 import { db } from "./db/index.js"
 
-import { verifyPassword } from "./hashing.js"
-import type { User } from "./db/schema.js"
-import { createMiddleware } from "hono/factory"
-import { every } from "hono/combine"
+import { hashPassword, verifyPassword } from "./hashing.js"
+import {
+  user,
+  userRoleSchmea,
+  userSchema,
+  type User,
+  type UserRole,
+} from "./db/schema.js"
 
 const app = new Hono()
 
@@ -27,6 +32,9 @@ const jwtSchema = z.object({
   user: z.object({
     id: z.string(),
     name: z.string(),
+    fullName: z.string().nullish(),
+    role: userRoleSchmea(),
+    accountActive: z.boolean(),
   }),
 })
 
@@ -34,13 +42,9 @@ type Jwt = z.infer<typeof jwtSchema>
 
 const makeJwt = (user: User) => {
   return sign(
-    // this should always be valid
     jwtSchema.parse({
       exp: addDays(new Date(), 1).getTime(),
-      user: {
-        id: user.id,
-        name: user.name,
-      },
+      user,
     }),
     JWT_SECRET,
   )
@@ -68,51 +72,95 @@ app.post("/login", zValidator("json", loginSchema), async (c) => {
     throw new HTTPException(401, { message: "Invalid credentials" })
   }
 
-  const exp = addDays(new Date(), 1).getTime()
-
-  const jwt = await sign(
-    {
-      exp,
-      user: {
-        somekey: "hehehehehehhe",
-      },
-    },
-    JWT_SECRET,
-  )
+  const jwt = await makeJwt(userInfo)
 
   return c.json({ token: jwt })
 })
 
-// for some reason types are not working, maybe its the every function
-const jwtMiddleware = every(
-  jwt({ secret: JWT_SECRET }),
-  createMiddleware<{
-    Variables: {
-      jwtPayload: Jwt
-      something: string
-    }
-  }>(async (c, next) => {
+const getUser = () =>
+  createMiddleware<{ Variables: { user: User } }>(async (c, next) => {
     const token = c.get("jwtPayload")
     const parsed = jwtSchema.safeParse(token)
 
-    if (!parsed.success) {
+    if (!parsed.success)
       throw new HTTPException(401, { message: "Invalid token" })
-    }
 
-    c.set("jwtPayload", parsed.data)
+    const user = await db.query.user.findFirst({
+      where: (user, { eq }) => eq(user.id, parsed.data.user.id),
+    })
+
+    if (!user) throw new HTTPException(401, { message: "Invalid token" })
+
+    c.set("user", user)
 
     await next()
-  }),
-)
+  })
 
-app.get(
-  "/validate",
-  jwtMiddleware,
+const authGuard = (...roles: UserRole[]) =>
+  createMiddleware<{ Variables: { user: User } }>(async (c, next) => {
+    const user = c.get("user")
 
-  (c) => {
-    const token = c.get("jwtPayload")
+    if (!roles.includes(user.role)) {
+      throw new HTTPException(403, { message: "Forbidden" })
+    }
+
+    await next()
+  })
+
+app.get("/me", jwt({ secret: JWT_SECRET }), getUser(), (c) => {
+  const user = c.get("user")
+  return c.json({
+    id: user.id,
+    name: user.name,
+    fullName: user.fullName,
+    role: user.role,
+    accountActive: user.accountActive,
+  })
+})
+
+const createUserSchema = userSchema
+  .omit({ id: true, passwordHash: true })
+  .extend({ password: z.string() })
+
+app.post(
+  "/create",
+  jwt({ secret: JWT_SECRET }),
+  getUser(),
+  authGuard("ADMIN"),
+  zValidator("json", createUserSchema),
+  async (c) => {
+    const createUser = c.req.valid("json")
+
+    const userExists = await db.query.user.findFirst({
+      where: (user, { eq }) => eq(user.name, createUser.name),
+    })
+
+    if (userExists) {
+      throw new HTTPException(400, {
+        message: `User with name "${createUser.name}" already exists`,
+      })
+    }
+
+    const [createdUser] = await db
+      .insert(user)
+      .values({
+        ...createUser,
+        passwordHash: hashPassword(createUser.password),
+      })
+      .returning()
+
+    if (!createdUser) {
+      throw new HTTPException(500, { message: "Error creating user" })
+    }
+
     return c.json({
-      token,
+      user: {
+        id: createdUser.id,
+        name: createdUser.name,
+        fullName: createdUser.fullName,
+        role: createdUser.role,
+        accountActive: createdUser.accountActive,
+      },
     })
   },
 )

@@ -8,6 +8,7 @@ async function seed() {
     .values({
       name: "admin",
       passwordHash: hashPassword("password"),
+      role: "ADMIN",
     })
     .returning()
 
