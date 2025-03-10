@@ -1,54 +1,17 @@
 import { Hono } from "hono"
-import { jwt, sign } from "hono/jwt"
 import { HTTPException } from "hono/http-exception"
-import { createMiddleware } from "hono/factory"
 import { zValidator } from "@hono/zod-validator"
-import { string, z } from "zod"
-import { addDays } from "date-fns"
+import { z } from "zod"
 
-import { db } from "./db/index.js"
+import { verifyPassword } from "./hashing.js"
 
-import { hashPassword, verifyPassword } from "./hashing.js"
-import {
-  user,
-  userRoleSchmea,
-  userSchema,
-  type User,
-  type UserRole,
-} from "./db/schema.js"
+import { authGuard } from "./middlewares/authGuard.js"
+import { getUser } from "./middlewares/getUser.js"
+import { jwtMiddleware, makeJwt } from "./utils/jwt.js"
+
+import UserService, { createUserSchema } from "./services/UserService.js"
 
 const app = new Hono()
-
-// login: username e senha -> retorna JWT
-// validar token: recebe token JWT pelos headers e valida
-// criação de usuário: apenas admin (?) cria usuários -> retorna dados do usuário
-//
-
-const JWT_SECRET =
-  process.env.JWT_SECRET || "your-secret-key-change-this-in-production"
-
-const jwtSchema = z.object({
-  exp: z.number(),
-  user: z.object({
-    id: z.string(),
-    name: z.string(),
-    fullName: z.string().nullish(),
-    role: userRoleSchmea(),
-    accountActive: z.boolean(),
-  }),
-})
-
-type Jwt = z.infer<typeof jwtSchema>
-
-const makeJwt = (user: User) => {
-  return sign(
-    jwtSchema.parse({
-      exp: addDays(new Date(), 1).getTime(),
-      user,
-    }),
-    JWT_SECRET,
-  )
-}
 
 const loginSchema = z.object({
   username: z.string(),
@@ -58,9 +21,7 @@ const loginSchema = z.object({
 app.post("/login", zValidator("json", loginSchema), async (c) => {
   const { username, password } = c.req.valid("json")
 
-  const userInfo = await db.query.user.findFirst({
-    where: (user, { eq }) => eq(user.name, username),
-  })
+  const userInfo = await UserService.findByName(username)
 
   if (!userInfo) {
     throw new HTTPException(401, { message: "Invalid credentials" })
@@ -77,37 +38,7 @@ app.post("/login", zValidator("json", loginSchema), async (c) => {
   return c.json({ token: jwt })
 })
 
-const getUser = () =>
-  createMiddleware<{ Variables: { user: User } }>(async (c, next) => {
-    const token = c.get("jwtPayload")
-    const parsed = jwtSchema.safeParse(token)
-
-    if (!parsed.success)
-      throw new HTTPException(401, { message: "Invalid token" })
-
-    const user = await db.query.user.findFirst({
-      where: (user, { eq }) => eq(user.id, parsed.data.user.id),
-    })
-
-    if (!user) throw new HTTPException(401, { message: "Invalid token" })
-
-    c.set("user", user)
-
-    await next()
-  })
-
-const authGuard = (...roles: UserRole[]) =>
-  createMiddleware<{ Variables: { user: User } }>(async (c, next) => {
-    const user = c.get("user")
-
-    if (!roles.includes(user.role)) {
-      throw new HTTPException(403, { message: "Forbidden" })
-    }
-
-    await next()
-  })
-
-app.get("/me", jwt({ secret: JWT_SECRET }), getUser(), (c) => {
+app.get("/me", jwtMiddleware(), getUser(), (c) => {
   const user = c.get("user")
   return c.json({
     id: user.id,
@@ -118,22 +49,16 @@ app.get("/me", jwt({ secret: JWT_SECRET }), getUser(), (c) => {
   })
 })
 
-const createUserSchema = userSchema
-  .omit({ id: true, passwordHash: true })
-  .extend({ password: z.string() })
-
 app.post(
   "/create",
-  jwt({ secret: JWT_SECRET }),
+  jwtMiddleware(),
   getUser(),
   authGuard("ADMIN"),
   zValidator("json", createUserSchema),
   async (c) => {
     const createUser = c.req.valid("json")
 
-    const userExists = await db.query.user.findFirst({
-      where: (user, { eq }) => eq(user.name, createUser.name),
-    })
+    const userExists = await UserService.findByName(createUser.name)
 
     if (userExists) {
       throw new HTTPException(400, {
@@ -141,13 +66,7 @@ app.post(
       })
     }
 
-    const [createdUser] = await db
-      .insert(user)
-      .values({
-        ...createUser,
-        passwordHash: hashPassword(createUser.password),
-      })
-      .returning()
+    const createdUser = await UserService.create(createUser)
 
     if (!createdUser) {
       throw new HTTPException(500, { message: "Error creating user" })
