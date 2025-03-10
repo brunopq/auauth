@@ -135,6 +135,22 @@ userRouter.patch(
   },
 )
 
+userRouter.delete("/:id", authGuard("ADMIN"), async (c) => {
+  const userId = c.req.param("id")
+
+  const userExists = await UserService.findById(userId)
+
+  if (!userExists) {
+    throw new HTTPException(404, {
+      message: `User with id "${userId}" does not exist`,
+    })
+  }
+
+  await UserService.delete(userId)
+
+  return c.status(204)
+})
+
 app.route("/users", userRouter)
 
 showRoutes(app, { colorize: true })

@@ -56,6 +56,10 @@ class UserService {
 
     return updatedUser
   }
+
+  async delete(id: string) {
+    return await db.delete(user).where(eq(user.id, id))
+  }
 }
 
 export default new UserService()
