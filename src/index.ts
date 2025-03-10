@@ -1,4 +1,5 @@
 import { Hono } from "hono"
+import { showRoutes } from "hono/dev"
 import { HTTPException } from "hono/http-exception"
 import { zValidator } from "@hono/zod-validator"
 import { z } from "zod"
@@ -9,7 +10,10 @@ import { authGuard } from "./middlewares/authGuard.js"
 import { getUser } from "./middlewares/getUser.js"
 import { jwtMiddleware, makeJwt } from "./utils/jwt.js"
 
-import UserService, { createUserSchema } from "./services/UserService.js"
+import UserService, {
+  createUserSchema,
+  updateUserSchema,
+} from "./services/UserService.js"
 
 const app = new Hono()
 
@@ -38,7 +42,22 @@ app.post("/login", zValidator("json", loginSchema), async (c) => {
   return c.json({ token: jwt })
 })
 
-app.get("/me", jwtMiddleware(), getUser(), (c) => {
+const userRouter = new Hono().use(jwtMiddleware(), getUser())
+
+userRouter.get("/", async (c) => {
+  const users = await UserService.findAll()
+  return c.json({
+    users: users.map((u) => ({
+      id: u.id,
+      name: u.name,
+      fullName: u.fullName,
+      role: u.role,
+      accountActive: u.accountActive,
+    })),
+  })
+})
+
+userRouter.get("/me", (c) => {
   const user = c.get("user")
   return c.json({
     id: user.id,
@@ -49,10 +68,8 @@ app.get("/me", jwtMiddleware(), getUser(), (c) => {
   })
 })
 
-app.post(
-  "/create",
-  jwtMiddleware(),
-  getUser(),
+userRouter.post(
+  "/",
   authGuard("ADMIN"),
   zValidator("json", createUserSchema),
   async (c) => {
@@ -84,4 +101,41 @@ app.post(
   },
 )
 
+userRouter.patch(
+  "/:id",
+  authGuard("ADMIN"),
+  zValidator("json", updateUserSchema),
+  async (c) => {
+    const userId = c.req.param("id")
+    const updateUser = c.req.valid("json")
+
+    const userExists = await UserService.findById(userId)
+
+    if (!userExists) {
+      throw new HTTPException(404, {
+        message: `User with id "${userId}" does not exist`,
+      })
+    }
+
+    const updatedUser = await UserService.update(userId, updateUser)
+
+    if (!updatedUser) {
+      throw new HTTPException(500, { message: "Error update user" })
+    }
+
+    return c.json({
+      user: {
+        id: updatedUser.id,
+        name: updatedUser.name,
+        fullName: updatedUser.fullName,
+        role: updatedUser.role,
+        accountActive: updatedUser.accountActive,
+      },
+    })
+  },
+)
+
+app.route("/users", userRouter)
+
+showRoutes(app, { colorize: true })
 export default app
