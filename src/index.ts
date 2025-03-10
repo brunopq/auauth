@@ -27,7 +27,7 @@ app.post("/login", zValidator("json", loginSchema), async (c) => {
 
   const userInfo = await UserService.findByName(username)
 
-  if (!userInfo) {
+  if (!userInfo || !userInfo.accountActive) {
     throw new HTTPException(401, { message: "Invalid credentials" })
   }
 

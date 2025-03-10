@@ -17,7 +17,8 @@ export const getUser = () =>
 
     const user = await UserService.findById(parsed.data.user.id)
 
-    if (!user) throw new HTTPException(401, { message: "Invalid token" })
+    if (!user || !user.accountActive)
+      throw new HTTPException(401, { message: "Invalid token" })
 
     c.set("user", user)
 
