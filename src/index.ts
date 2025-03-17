@@ -44,8 +44,19 @@ app.post("/login", zValidator("json", loginSchema), async (c) => {
 
 const userRouter = new Hono().use(jwtMiddleware(), getUser())
 
-userRouter.get("/", async (c) => {
-  const users = await UserService.findAll()
+const idsSchema = z.object({
+  ids: z
+    .string()
+    .regex(
+      /([0-9A-F]{8}-[0-9A-F]{4}-[4][0-9A-F]{3}-[89AB][0-9A-F]{3}-[0-9A-F]{12},?)+/i,
+    )
+    .optional(),
+})
+
+userRouter.get("/", zValidator("query", idsSchema), async (c) => {
+  const ids = c.req.valid("query").ids?.split(",")
+
+  const users = await UserService.findAll(ids)
   return c.json({
     users: users.map((u) => ({
       id: u.id,

@@ -17,7 +17,12 @@ export type CreateUser = z.infer<typeof createUserSchema>
 export type UpdateUser = z.infer<typeof updateUserSchema>
 
 class UserService {
-  async findAll() {
+  async findAll(ids?: string[]) {
+    if (ids) {
+      return await db.query.user.findMany({
+        where: (user, { inArray }) => inArray(user.id, ids),
+      })
+    }
     return await db.query.user.findMany()
   }
 
